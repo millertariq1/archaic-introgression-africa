@@ -16,7 +16,14 @@ The focus is on Yoruba and Mende populations (1000 Genomes Project), compared wi
 - `notebooks/` → Jupyter notebooks with analyses (e.g., D-stats, PCA)  
 - `scripts/` → Helper Python or R scripts  
 - `results/` → Tables and text files with statistics  
-- `figures/` → Plots and visualizations  
+- `figures/` → Plots and visualizations
+
+- ## Status Update – March-July 2025
+- WA VCFs ready, archaic genomes located, panel in place.
+- scikit-allel needs resolution (maybe switch to cyvcf2).
+- CEU subset VCF not finalized — priority for AF comparisons.
+- Outgroup (chimp VCF) still needed.
+- Next: Run D-statistics and f-ratio tests once CEU + archaic datasets are ready.
 
 ## Current Progress
 Initial work focuses on Yoruba genomes (1000 Genomes) with D-statistics to test for ghost archaic introgression.  
