@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# pipeline_qpd.sh — Common-sites → Merge → EIGENSTRAT → qpDstat inputs
+set -euo pipefail
+
+########## CONFIG (edit these paths/globs) ##########
+REF="ref/hs37d5.fa.gz"                       # hs37d5 FASTA (indexed)
+OUT="eigen"                                  # output root
+THREADS="${THREADS:-4}"
+
+# Harmonized chr21/22 VCFs (already on hs37d5, normalized)
+WA_GLOB='harm_dbg/ok/*WA*.vcf.gz'            # West African (YRI/ESN/GWD/MSL/ACB subset VCFs)
+CEU_GLOB='harm_dbg/ok/*CEU*.vcf.gz'
+NEA_GLOB='harm_dbg/ok/*Nea*.vcf.gz'
+DEN_GLOB='harm_dbg/ok/*Den*.vcf.gz'
+CHI_GLOB='harm_dbg/ok/*CHIMP*.vcf.gz'        # chimp hg19-aligned (liftover done)
+#####################################################
+
+log(){ echo "[$(date +'%F %T')] $*"; }
+need(){ command -v "$1" >/dev/null || { echo "Missing: $1"; exit 1; }; }
+
+main(){
+  log "Checking tools"
+  for t in bcftools plink plink2 convertf awk sort comm bgzip; do need "$t"; done
+  [[ -s "$REF" && -s "${REF}.fai" ]] || { echo "REF or REF.fai missing"; exit 1; }
+
+  mkdir -p "$OUT"/{tmp,logs,filtered,results}
+
+  log "Gathering input VCFs"
+  WA=( $WA_GLOB );  CEU=( $CEU_GLOB );  NEA=( $NEA_GLOB );  DEN=( $DEN_GLOB );  CHI=( $CHI_GLOB )
+  for arr in WA CEU NEA DEN CHI; do
+    eval 'n=${#'"$arr"'[@]}'
+    (( n > 0 )) || { echo "No files for $arr"; exit 1; }
+  done
+
+  log "Step 1: Build per-group site lists"
+  sites_group(){
+    local tag=$1; shift
+    for v in "$@"; do bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "$v"; done | sort -u > "$OUT/tmp/sites_${tag}.tsv"
+    log "  ${tag}: $(wc -l < "$OUT/tmp/sites_${tag}.tsv") sites"
+  }
+  sites_group WA  "${WA[@]}"
+  sites_group CEU "${CEU[@]}"
+  sites_group NEA "${NEA[@]}"
+  sites_group DEN "${DEN[@]}"
+  sites_group CHI "${CHI[@]}"
+
+  log "Step 2: Compute intersection across WA, CEU, NEA, DEN, CHI"
+  comm -12 <(comm -12 <(sort -u "$OUT/tmp/sites_WA.tsv") <(sort -u "$OUT/tmp/sites_CEU.tsv")) \
+           <(comm -12 <(sort -u "$OUT/tmp/sites_NEA.tsv") <(sort -u "$OUT/tmp/sites_DEN.tsv")) \
+    | comm -12 - <(sort -u "$OUT/tmp/sites_CHI.tsv") > "$OUT/tmp/sites_common.tsv"
+  N_COMMON=$(wc -l < "$OUT/tmp/sites_common.tsv")
+  [[ $N_COMMON -gt 0 ]] || { echo "No common sites!"; exit 1; }
+  log "  Common sites: $N_COMMON"
+  awk 'BEGIN{OFS="\t"}{print $1,$2-1,$2,$3,$4}' "$OUT/tmp/sites_common.tsv" > "$OUT/tmp/sites_common.bed"
+
+  log "Step 3: Filter each VCF to common sites"
+  filter_to_common(){
+    local tag=$1; shift
+    for v in "$@"; do
+      b=$(basename "$v" .vcf.gz)
+      o="$OUT/filtered/${b}.common.vcf.gz"
+      bcftools view -R "$OUT/tmp/sites_common.bed" -Oz -o "$o" "$v" 2> "$OUT/logs/${b}.filter.log"
+      bcftools index -t "$o"
+    done
+    log "  $tag filtered."
+  }
+  filter_to_common WA  "${WA[@]}"
+  filter_to_common CEU "${CEU[@]}"
+  filter_to_common NEA "${NEA[@]}"
+  filter_to_common DEN "${DEN[@]}"
+  filter_to_common CHI "${CHI[@]}"
+
+  log "Step 4: Build per-pop PLINK BEDs (use const FID to encode pop)"
+  mkbed(){
+    local tag=$1; shift
+    local catcmd="bcftools concat -Oz -o /dev/stdout $*"
+    # shellcheck disable=SC2086
+    plink2 --vcf <($catcmd) --threads $THREADS \
+      --const-fid "$tag" --set-all-var-ids @:#:\$r:\$a \
+      --make-bed --out "$OUT/tmp/$tag" 1> "$OUT/logs/${tag}.plink2.log" 2>&1
+  }
+  mkbed WA  "$OUT"/filtered/*WA*.common.vcf.gz
+  mkbed CEU "$OUT"/filtered/*CEU*.common.vcf.gz
+  mkbed NEA "$OUT"/filtered/*Nea*.common.vcf.gz
+  mkbed DEN "$OUT"/filtered/*Den*.common.vcf.gz
+  mkbed CHI "$OUT"/filtered/*CHIMP*.common.vcf.gz
+
+  log "Step 5: Incremental PLINK merge with flip-scan fallback"
+  cp "$OUT/tmp/WA.bed" "$OUT/all.bed"; cp "$OUT/tmp/WA.bim" "$OUT/all.bim"; cp "$OUT/tmp/WA.fam" "$OUT/all.fam"
+  for G in CEU NEA DEN CHI; do
+    plink --bfile "$OUT/all" --bmerge "$OUT/tmp/$G" --make-bed --out "$OUT/all2" \
+      1>>"$OUT/logs/merge.log" 2>&1 || {
+      plink --bfile "$OUT/all" --bmerge "$OUT/tmp/$G" --flip-scan --out "$OUT/tmp/flip_${G}" 1>>"$OUT/logs/merge.log" 2>&1
+      plink --bfile "$OUT/tmp/$G" --flip "$OUT/tmp/flip_${G}.flip" --make-bed --out "$OUT/tmp/${G}_f" 1>>"$OUT/logs/merge.log" 2>&1
+      plink --bfile "$OUT/all" --bmerge "$OUT/tmp/${G}_f" --make-bed --out "$OUT/all2" 1>>"$OUT/logs/merge.log" 2>&1
+    }
+    mv "$OUT/all2.bed" "$OUT/all.bed"; mv "$OUT/all2.bim" "$OUT/all.bim"; mv "$OUT/all2.fam" "$OUT/all.fam"
+  done
+
+  log "Step 6: Convert BED → EIGENSTRAT"
+  cat > "$OUT/par.bed2eig" <<EOF
+genotypename:   $OUT/all.bed
+snpname:        $OUT/all.bim
+indivname:      $OUT/all.fam
+outputformat:   EIGENSTRAT
+genotypeoutname:$OUT/all.geno
+snpoutname:     $OUT/all.snp
+indivoutname:   $OUT/all.ind
+familynames:    NO
+EOF
+  convertf -p "$OUT/par.bed2eig" 1> "$OUT/logs/convertf.log" 2>&1
+
+  # Label pops in .ind from FID (WA/CEU/NEA/DEN/CHI)
+  awk '{print $2,"U",$1}' "$OUT/all.fam" > "$OUT/all.ind"
+
+  log "Step 7: Write qpDstat pop and par files"
+  cat > "$OUT/qpD.pops" <<EOF
+WA CEU NEA CHI
+WA CEU DEN CHI
+EOF
+  cat > "$OUT/qpD.par" <<EOF
+genotypename: $OUT/all.geno
+snpname:      $OUT/all.snp
+indivname:    $OUT/all.ind
+popfilename:  $OUT/qpD.pops
+f4mode: YES
+EOF
+
+  log "Step 8: Quick QC"
+  NSNP=$(wc -l < "$OUT/all.snp" || echo 0)
+  NWA=$(awk '$3=="WA"'  "$OUT/all.ind" | wc -l); NCEU=$(awk '$3=="CEU"' "$OUT/all.ind" | wc -l)
+  NNEA=$(awk '$3=="NEA"' "$OUT/all.ind" | wc -l); NDEN=$(awk '$3=="DEN"' "$OUT/all.ind" | wc -l)
+  NCHI=$(awk '$3=="CHI"' "$OUT/all.ind" | wc -l)
+  {
+    echo "SNPs: $NSNP"
+    echo "IND: WA=$NWA CEU=$NCEU NEA=$NNEA DEN=$NDEN CHI=$NCHI"
+  } | tee "$OUT/results/qc_summary.txt"
+
+  log "DONE → EIGENSTRAT at $OUT/all.{geno,snp,ind} ; qpD: $OUT/{qpD.par,qpD.pops}"
+  log "Run qpDstat outside Colab:  qpDstat -p $OUT/qpD.par > $OUT/results/D.out"
+}
+
+main "$@"
+
+
