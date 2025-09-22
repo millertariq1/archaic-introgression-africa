@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+F=figures; mkdir -p "$F"
+
+python - <<'PY'
+import os, pandas as pd, matplotlib.pyplot as plt, numpy as np
+os.makedirs("figures", exist_ok=True)
+
+# ---- Figure 1: ΔAF scatter from results/AF_merge_preview.tsv ----
+try:
+    m = pd.read_csv("results/AF_merge_preview.tsv", sep="\t")
+    if {"AF_WA","delta_AF"}.issubset(m.columns):
+        plt.figure()
+        plt.scatter(m["AF_WA"], m["delta_AF"], s=3, alpha=0.4)
+        plt.xlabel("AF (WA)"); plt.ylabel("ΔAF = AF_WA - AF_CEU")
+        plt.title("WA vs CEU — allele frequency contrast (chr21/22)")
+        plt.savefig("figures/af_scatter_chr21_22.png", dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        open("figures/af_scatter_chr21_22.README.txt","w").write("Missing columns AF_WA/delta_AF.\n")
+except Exception as e:
+    open("figures/af_scatter_chr21_22.README.txt","w").write(f"Need results/AF_merge_preview.tsv: {e}\n")
+
+# ---- Figure 2: D-stat bars from results/qpD_results.tsv ----
+try:
+    q = pd.read_csv("results/qpD_results.tsv", sep="\t")
+    labs = q["test"].astype(str).tolist()
+    vals = q["D"].astype(float).values
+    se = q["stderr"].astype(float).values if "stderr" in q.columns else None
+    x = np.arange(len(vals))
+    plt.figure()
+    plt.bar(x, vals, yerr=se if se is not None else None)
+    plt.xticks(x, labs, rotation=15, ha="right")
+    plt.ylabel("D"); plt.title("D-statistics (chr21/22)")
+    plt.savefig("figures/dstats_bars_chr21_22.png", dpi=150, bbox_inches="tight")
+    plt.close()
+except Exception as e:
+    open("figures/dstats_bars_chr21_22.README.txt","w").write(f"Need results/qpD_results.tsv: {e}\n")
+PY
+
+echo "Done → figures/af_scatter_chr21_22.png , figures/dstats_bars_chr21_22.png (or README placeholders)."
