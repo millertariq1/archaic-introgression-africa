@@ -14,7 +14,6 @@
 ## How to read
 1. Check `qc_summary.txt` (nSNP, nInd by pop).
 2. Review ΔAF candidates (if any) in `WA_vs_CEU_candidates.tsv`.
-3. Look at `qpD_results.tsv` for D(WA,CEU;NEA,CHI) and D(WA,CEU;DEN,CHI).
-4. See `qpD_interpretation.md` for thresholds and caveats.
+3. See `qpD_interpretation.md` for thresholds and caveats.
 
 **Notes:** Demo is chr21/22 for speed; full-genome planned. Public data only; reference is hs37d5.
